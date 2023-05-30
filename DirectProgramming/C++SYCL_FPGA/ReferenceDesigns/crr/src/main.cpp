@@ -62,28 +62,32 @@ void CRRCompute(const InputData &inp, const CRRInParams &in_params, CRRResParams
    double x = in_params.umin;
    // option value computed at each final node
    for (int i = 0; i <= m; i++, x *= in_params.u2) {
-     pvalue[i] = fmax(inp.cp * (x - inp.strike), 0.0);
+     pvalue[i] = sycl::fmax(inp.cp * (x - inp.strike), 0.0);
    }
    double new_umin = in_params.umin;
    // backward recursion to evaluate option price
    for (int i = m - 1; i >= 0; i--) {
      new_umin *= in_params.u;
      x = new_umin;
-     for (int j = 0; j <= i; j++, x *= in_params.u2) {
-       pvalue[j] = fmax(in_params.c1 * pvalue[j] + in_params.c2 * pvalue[j + 1],
-                        inp.cp * (x - inp.strike));
-     }
-     // pgreek will only be used if this option is of type 0
-     if (i == 4) {
-       res_params.pgreek[i-1] = pvalue[2];
-     }
-     if (i == 2) {
-       for (int q = 0; q <= 2; q++) {
-         res_params.pgreek[q] = pvalue[q];
-       }
+     for (int j = 0; j <= m - 1; j++, x *= in_params.u2) {
+        double temp = pvalue[j];
+        double value1 = in_params.c1 * temp + in_params.c2 * pvalue[j + 1];
+        double value2 = inp.cp * (x - inp.strike);
+        double result = (j <= i) ? sycl::fmax(value1, value2) : temp;
+        pvalue[j] = result;
+
+        if(j == 0) {
+          res_params.val = result;
+        }
+        if(i == 4 && j == 2) {
+          // pgreek will only be used if this option is of type 0
+          res_params.pgreek[3] = result;
+        }
+        if(i == 2 && j <= 2) {
+          res_params.pgreek[j] = result;
+        }
      }
    }
-   res_params.val = pvalue[0];
 }
 
 double CrrSolver(const int n_crrs,
@@ -103,6 +107,7 @@ double CrrSolver(const int n_crrs,
     accessor accessor_r(r_params, h,  write_only, no_init);
 
     h.single_task<CRRSolver>([=]() [[intel::kernel_args_restrict]] {
+      [[intel::loop_coalesce(2)]]
       for (int i = 0; i < n_crrs; ++i) {
         InputData inp = accessor_inp[i];
 
