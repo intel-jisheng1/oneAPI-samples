@@ -56,23 +56,23 @@ void CRRCompute(const InputData &inp, const CRRInParams &in_params, CRRResParams
 
    double pvalue[kMaxNSteps3];
 
-   int m = in_params.n_steps;
-   if (optionType0) m += kExtraStepsForOptionType0;
+   int n_steps = in_params.n_steps;
+   if (optionType0) n_steps += kExtraStepsForOptionType0;
 
-   double x = in_params.umin;
+   double umin = in_params.umin;
    // option value computed at each final node
-   for (int i = 0; i <= m; i++, x *= in_params.u2) {
-     pvalue[i] = sycl::fmax(inp.cp * (x - inp.strike), 0.0);
+   for (int i = 0; i <= n_steps; i++, umin *= in_params.u2) {
+     pvalue[i] = sycl::fmax(inp.cp * (umin - inp.strike), 0.0);
    }
-   double new_umin = in_params.umin;
+   
+   umin = in_params.umin;
    // backward recursion to evaluate option price
-   for (int i = m - 1; i >= 0; i--) {
-     new_umin *= in_params.u;
-     x = new_umin;
-     for (int j = 0; j <= m - 1; j++, x *= in_params.u2) {
+   for (int i = n_steps - 1; i >= 0; i--) {
+     umin *= in_params.u;
+     for (int j = 0; j <= n_steps - 1; j++, umin *= in_params.u2) {
         double temp = pvalue[j];
         double value1 = in_params.c1 * temp + in_params.c2 * pvalue[j + 1];
-        double value2 = inp.cp * (x - inp.strike);
+        double value2 = inp.cp * (umin - inp.strike);
         double result = (j <= i) ? sycl::fmax(value1, value2) : temp;
         pvalue[j] = result;
 
