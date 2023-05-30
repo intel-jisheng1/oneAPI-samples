@@ -32,308 +32,94 @@
 //
 ////////////////////////////////////////////////////////////////////////////////
 //
-// This design implments simple Cox-Ross-Rubinstein(CRR) binomial tree model
+// This design implements a simple Cox-Ross-Rubinstein(CRR) binomial tree model
 // with Greeks for American exercise options.
 //
-//
-// Optimization summary:
-//    -- Area-consuming but infrequent calculation is done on CPU.
-//    -- Parallelize the calculation of a single CRR.
-//    -- Run multiple independent CRRs in parallel.
-//    -- Optimized memory configurations to reduce the need for replication
-//       and to eliminate the need for double-pumping M20Ks.
-//
-// The following diagram shows the mechanism of optimizations to CRR.
-//
-//
-//                                               +------+         ^
-//                                 +------------>|optval|         |
-//                                 |             | [2]  |         |
-//                                 |             +------+         |
-//                                 |                              |
-//                                 |                              |
-//                              +--+---+                          |
-//                +------------>|optval|                          |
-//                |             | [1]  |                          |
-//                |             +--+---+                          |
-//                |                |                              |
-//                |                |                              |
-//                |                |                              |   Loop4(L4)
-//                |                |                              |   updates
-//            +---+--+             +------------>+------+         |   multiple
-//            |optval|                           |optval|         |   elements
-//            | [0]  |                           | [1]  |         |   in optval[]
-//            +---+--+             +------------>+------+         |   simultaneously
-//                |                |                              |
-//                |                |                              |
-//                |                |                              |
-//                |                |                              |
-//                |             +--+---+                          |
-//                |             |optval|                          |
-//                +------------>| [0]  |                          |
-//                              +--+---+                          |
-//                                 |                              |
-//                                 |                              |
-//                                 |             +------+         |
-//                                 |             |optval|         |
-//                                 +------------>| [0]  |         |
-//                                               +------+         +
-//
-//
-//
-//
-//                              step 1           step 2
-//
-//
-//                <------------------------------------------+
-//                  Loop3(L3) updates each level of the tree
-//
-//
+////////////////////////////////////////////////////////////////////////////////
 
-#include <sycl/sycl.hpp>
+#include <CL/sycl.hpp>
 #include <sycl/ext/intel/fpga_extensions.hpp>
-#include <cstddef>
-#include <cstdlib>
-#include <fstream>
 #include <iomanip>
-#include <iostream>
-#include <regex>
-#include <sstream>
-#include <string>
 
 #include "CRR_common.hpp"
 
-#include "exception_handler.hpp"
+// dpc_common.hpp can be found in the dev-utilities include folder.
+// e.g., $ONEAPI_ROOT/dev-utilities/include/dpc_common.hpp
+#include "dpc_common.hpp"
 
 using namespace std;
 using namespace sycl;
 
 class CRRSolver;
-double CrrSolver(const int n_items, vector<CRRMeta> &in_params,
-                  vector<CRRResParams> &res_params,
-                  vector<CRRPerStepMeta> &in_params2, queue &q) {
-  auto start = std::chrono::steady_clock::now();
 
-  constexpr int steps = kMaxNSteps2;
+void CRRCompute(const InputData &inp, const CRRInParams &in_params, CRRResParams &res_params, bool optionType0) {
 
-  const int n_crr =
-      (((n_items + (OUTER_UNROLL - 1)) / OUTER_UNROLL) * OUTER_UNROLL) * 3;
+   double pvalue[kMaxNSteps3];
 
-  {
-    buffer<CRRMeta, 1> i_params(in_params.size());
-    buffer<CRRPerStepMeta, 1> a_params(in_params2.size());
-    buffer<CRRResParams, 1> r_params(res_params.size());
-    r_params.set_final_data(res_params.data());
+   int m = in_params.n_steps;
+   if (optionType0) m += kExtraStepsForOptionType0;
 
-    event e;
-    {
-      // copy the input buffers
-      q.submit([&](handler& h) {
-        auto accessor_v =
-          i_params.template get_access<access::mode::discard_write>(h);
-        h.copy(in_params.data(), accessor_v);
-      });
+   double x = in_params.umin;
+   // option value computed at each final node
+   for (int i = 0; i <= m; i++, x *= in_params.u2) {
+     pvalue[i] = fmax(inp.cp * (x - inp.strike), 0.0);
+   }
+   double new_umin = in_params.umin;
+   // backward recursion to evaluate option price
+   for (int i = m - 1; i >= 0; i--) {
+     new_umin *= in_params.u;
+     x = new_umin;
+     for (int j = 0; j <= i; j++, x *= in_params.u2) {
+       pvalue[j] = fmax(in_params.c1 * pvalue[j] + in_params.c2 * pvalue[j + 1],
+                        inp.cp * (x - inp.strike));
+     }
+     // pgreek will only be used if this option is of type 0
+     if (i == 4) {
+       res_params.pgreek[i-1] = pvalue[2];
+     }
+     if (i == 2) {
+       for (int q = 0; q <= 2; q++) {
+         res_params.pgreek[q] = pvalue[q];
+       }
+     }
+   }
+   res_params.val = pvalue[0];
+}
 
-      q.submit([&](handler& h) {
-        auto accessor_v2 =
-          a_params.template get_access<access::mode::discard_write>(h);
-        h.copy(in_params2.data(), accessor_v2);
-      });
+double CrrSolver(const int n_crrs,
+                 const vector<InputData> &inp,
+                 const vector<CRRInParams> &in_params,
+                 vector<CRRResParams> &res_params,
+                 queue &q) {
+  dpc_common::TimeInterval timer;
 
-      // start the main kernel
-      e = q.submit([&](handler &h) {
-        auto accessor_v =
-            i_params.template get_access<access::mode::read_write>(h);
+  buffer inp_params(inp);
+  buffer i_params(in_params);
+  buffer r_params(res_params);
 
-        auto accessor_v2 =
-            a_params.template get_access<access::mode::read_write>(h);
+  q.submit([&](handler &h) {
+    accessor accessor_inp(inp_params, h, read_only);
+    accessor accessor_i(i_params, h, read_only);
+    accessor accessor_r(r_params, h,  write_only, no_init);
 
-        auto accessor_r =
-            r_params.template get_access<access::mode::discard_write>(h);
+    h.single_task<CRRSolver>([=]() [[intel::kernel_args_restrict]] {
+      for (int i = 0; i < n_crrs; ++i) {
+        InputData inp = accessor_inp[i];
 
-        h.single_task<CRRSolver>([=]() [[intel::kernel_args_restrict]] {
-          // Kernel requires n_crr to be a multiple of OUTER_UNROLL.
-          // This is taken care of by the host.
-          const int n_crr_div = n_crr / OUTER_UNROLL;
+        for (int j = 0; j < kNumOptionTypes; j++) {
+          int k = i*kNumOptionTypes + j;
+          CRRInParams vals = accessor_i[k];
 
-          // Outerloop counter. Use while-loop for better timing-closure
-          // characteristics because it tells the compiler the loop body will
-          // never be skipped.
-          int oc = 0;
-          do {
-            // Metadata of CRR problems
-            [[intel::fpga_register]] double u[OUTER_UNROLL];
-            [[intel::fpga_register]] double c1[OUTER_UNROLL];
-            [[intel::fpga_register]] double c2[OUTER_UNROLL];
-            [[intel::fpga_register]] double param_1[OUTER_UNROLL];
-            [[intel::fpga_register]] double param_2[OUTER_UNROLL];
-            [[intel::fpga_register]] short n_steps[OUTER_UNROLL];
+          CRRResParams res_params;
+          CRRCompute(inp, vals, res_params, (j == 0) /* option type 0 */);
 
-            // Current values in binomial tree.  We only need to keep track of
-            // one level worth of data, not the entire tree.
-            [[intel::fpga_memory, intel::singlepump,
-              intel::bankwidth(sizeof(double)),
-              intel::numbanks(INNER_UNROLL * OUTER_UNROLL_POW2),
-              intel::private_copies(
-                  8)]] double optval[kMaxNSteps3][OUTER_UNROLL_POW2];
+          accessor_r[k] = res_params;
+        }
+      }
+    });
+  });
 
-            // Initial values in binomial tree, which correspond to the last
-            // level of the binomial tree.
-            [[intel::fpga_memory, intel::singlepump,
-              intel::bankwidth(sizeof(double)),
-              intel::numbanks(INNER_UNROLL * OUTER_UNROLL_POW2),
-              intel::private_copies(
-                  8)]] double init_optval[kMaxNSteps3][OUTER_UNROLL_POW2];
-
-            // u2_array precalculates the power function of u2.
-            [[intel::fpga_memory, intel::singlepump,
-              intel::bankwidth(sizeof(double)),
-              intel::numbanks(INNER_UNROLL * OUTER_UNROLL_POW2),
-              intel::private_copies(
-                  8)]] double u2_array[kMaxNSteps3][OUTER_UNROLL_POW2];
-
-            // p1powu_array precalculates p1 multipy the power of u.
-            [[intel::fpga_memory, intel::singlepump,
-              intel::bankwidth(sizeof(double)),
-              intel::numbanks(INNER_UNROLL * OUTER_UNROLL_POW2),
-              intel::private_copies(
-                  8)]] double p1powu_array[kMaxNSteps3][OUTER_UNROLL_POW2];
-
-            // n0_optval stores the binomial tree value corresponding to node 0
-            // of a level. This is the same as what's stored in
-            // optval/init_optval, but replicating this data allows us to have
-            // only one read port for optval and init_optval, thereby removing
-            // the need of double-pumping or replication. n0_optval_2 is a copy
-            // of n0_optval that stores the node 0 value for a specific layer of
-            // the tree. pgreek is the array saving values for post-calculating
-            // Greeks.
-            [[intel::fpga_register]] double n0_optval[OUTER_UNROLL];
-            [[intel::fpga_register]] double n0_optval_2[OUTER_UNROLL];
-            [[intel::fpga_register]] double pgreek[4][OUTER_UNROLL];
-
-            // L1 + L2:
-            // Populate init_optval -- calculate the last level of the binomial
-            // tree.
-            for (short ic = 0; ic < OUTER_UNROLL; ++ic) {
-              // Transfer data from DRAM to local memory or registers
-              const int c = oc * OUTER_UNROLL + ic;
-              const CRRMeta param = accessor_v[c];
-
-              u[ic] = param.u;
-              c1[ic] = param.c1;
-              c2[ic] = param.c2;
-              param_1[ic] = param.param_1;
-              param_2[ic] = param.param_2;
-              n_steps[ic] = param.n_steps;
-
-              for (short t = steps; t >= 0; --t) {
-                const ArrayEle param_array = accessor_v2[c].array_eles[t];
-
-                const double init_val = param_array.init_optval;
-
-                init_optval[t][ic] = init_val;
-
-                // n0_optval intends to store the node value at t == 0.
-                // Instead of qualifying this statement by an "if (t == 0)",
-                // which couples the loop counter to the timing path of the
-                // assignment, we reverse the loop direction so the last value
-                // stored corresponds to t == 0.
-                n0_optval[ic] = init_val;
-
-                // Transfer data from DRAM to local memory or registers
-                u2_array[t][ic] = param_array.u2;
-                p1powu_array[t][ic] = param_array.p1powu;
-              }
-            }
-
-            // L3:
-            // Update optval[] -- calculate each level of the binomial tree.
-            // reg[] helps to achieve updating INNER_UNROLL elements in optval[]
-            // simultaneously.
-            [[intel::disable_loop_pipelining]] // NO-FORMAT: Attribute
-            for (short t = 0; t <= steps - 1; ++t) {
-              [[intel::fpga_register]] double reg[INNER_UNROLL + 1][OUTER_UNROLL];
-
-              double val_1, val_2;
-
-              #pragma unroll
-              for (short ic = 0; ic < OUTER_UNROLL; ++ic) {
-                reg[0][ic] = n0_optval[ic];
-              }
-
-              // L4:
-              // Calculate all the elements in optval[] -- all the tree nodes
-              // for one level of the tree
-              [[intel::ivdep]] // NO-FORMAT: Attribute
-              for (int n = 0; n <= steps - 1 - t; n += INNER_UNROLL) {
-
-                #pragma unroll
-                for (short ic = 0; ic < OUTER_UNROLL; ++ic) {
-
-                  #pragma unroll
-                  for (short ri = 1; ri <= INNER_UNROLL; ++ri) {
-                    reg[ri][ic] =
-                        (t == 0) ? init_optval[n + ri][ic] : optval[n + ri][ic];
-                  }
-
-                  #pragma unroll
-                  for (short ri = 0; ri < INNER_UNROLL; ++ri) {
-                    const double val = sycl::fmax(
-                        c1[ic] * reg[ri][ic] + c2[ic] * reg[ri + 1][ic],
-                        p1powu_array[t][ic] * u2_array[n + ri][ic] -
-                            param_2[ic]);
-
-                    optval[n + ri][ic] = val;
-                    if (n + ri == 0) {
-                      n0_optval[ic] = val;
-                    }
-                    if (n + ri == 1) {
-                      val_1 = val;
-                    }
-                    if (n + ri == 2) {
-                      val_2 = val;
-                    }
-                  }
-
-                  reg[0][ic] = reg[INNER_UNROLL][ic];
-
-                  if (t == steps - 5) {
-                    pgreek[3][ic] = val_2;
-                  }
-                  if (t == steps - 3) {
-                    pgreek[0][ic] = n0_optval[ic];
-                    pgreek[1][ic] = val_1;
-                    pgreek[2][ic] = val_2;
-                    n0_optval_2[ic] = n0_optval[ic];
-                  }
-                }
-              }
-            }
-
-            // L5: transfer crr_res_paramss to DRAM
-            #pragma unroll
-            for (short ic = 0; ic < OUTER_UNROLL; ++ic) {
-              const int c = oc * OUTER_UNROLL + ic;
-              if (n_steps[ic] < steps) {
-                accessor_r[c].optval0 = n0_optval_2[ic];
-              } else {
-                accessor_r[c].optval0 = n0_optval[ic];
-              }
-              accessor_r[c].pgreek[0] = pgreek[0][ic];
-              accessor_r[c].pgreek[1] = pgreek[1][ic];
-              accessor_r[c].pgreek[2] = pgreek[2][ic];
-              accessor_r[c].pgreek[3] = pgreek[3][ic];
-            }
-            // Increment counters
-            oc += 1;
-          } while (oc < n_crr_div);
-        });
-      });
-    }
-  }
-
-  auto end = std::chrono::steady_clock::now();
-  double diff = std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
+  double diff = timer.Elapsed();
   return diff;
 }
 
@@ -385,22 +171,47 @@ void WriteOutputToFile(ofstream &output_file, const vector<OutputRes> &outp) {
   }
 }
 
-bool FindGetArgString(const string &arg, const char *str, char *str_value,
+void ReadGoldenResultFromFile(ifstream &input_file, vector<OutputRes> &golden) {
+  string line_of_res;
+  while (getline(input_file, line_of_res)) {
+    OutputRes temp;
+    istringstream line_of_res_ss(line_of_res);
+    line_of_res_ss >> temp.value;
+    line_of_res_ss.ignore(1, ' ');
+    line_of_res_ss >> temp.delta;
+    line_of_res_ss.ignore(1, ' ');
+    line_of_res_ss >> temp.gamma;
+    line_of_res_ss.ignore(1, ' ');
+    line_of_res_ss >> temp.vega;
+    line_of_res_ss.ignore(1, ' ');
+    line_of_res_ss >> temp.theta;
+    line_of_res_ss.ignore(1, ' ');
+    line_of_res_ss >> temp.rho;
+    golden.push_back(temp);
+  }
+}
+
+// Used in parsing of command-line arguments.
+// Precondition: out_val is a buffer of maxchars elements.
+// Upon successful return, out_val contains the string following 'in_name'
+// in 'in_arg'.
+bool GetArgValue(const char *in_arg, const char *in_name, char *out_val,
                       size_t maxchars) {
-  size_t found = arg.find(str, 0, strlen(str));
+  string arg_string(in_arg);
+  size_t found = arg_string.find(in_name, 0, strlen(in_name));
   if (found != string::npos) {
-    const char *sptr = &arg.c_str()[strlen(str)];
+    const char *sptr = &in_arg[strlen(in_name)];
     for (int i = 0; i < maxchars - 1; i++) {
       char ch = sptr[i];
       switch (ch) {
         case ' ':
         case '\t':
         case '\0':
-          str_value[i] = 0;
+          out_val[i] = 0;
           return true;
           break;
         default:
-          str_value[i] = ch;
+          out_val[i] = ch;
           break;
       }
     }
@@ -409,299 +220,155 @@ bool FindGetArgString(const string &arg, const char *str, char *str_value,
   return false;
 }
 
-// Perform data pre-processing work
-// Three different option prices are required to solve each CRR problem
-// The following lists why each option price is required:
-// [0] : Used to compute Premium, Delta, Gamma and Theta
-// [1] : Used to compute Rho
-// [2] : Used to compute Vega
-CRRInParams PrepareData(const InputData &inp) {
+// Generate probability of increase, increase factor, etc.
+// from the option's description in the input file
+CRRInParams PrepareOptionType(int type, const InputData &inp) {
   CRRInParams in_params;
   in_params.n_steps = inp.n_steps;
-
-  double r[2];
-  r[0] = pow(inp.df, 1.0 / inp.n_steps);
   double d_df = exp(-inp.t * kEpsilon);
-  r[1] = pow(inp.df * d_df, 1.0 / inp.n_steps);
-  in_params.u[0] = exp(inp.vol * sqrt(inp.t / inp.n_steps));
-  in_params.u[1] = in_params.u[0];
-  in_params.u[2] = exp((inp.vol + kEpsilon) * sqrt(inp.t / inp.n_steps));
 
-  in_params.u2[0] = in_params.u[0] * in_params.u[0];
-  in_params.u2[1] = in_params.u[1] * in_params.u[1];
-  in_params.u2[2] = in_params.u[2] * in_params.u[2];
-  in_params.umin[0] = inp.spot * pow(1 / in_params.u[0], inp.n_steps + kOpt0);
-  in_params.umin[1] = inp.spot * pow(1 / in_params.u[1], inp.n_steps);
-  in_params.umin[2] = inp.spot * pow(1 / in_params.u[2], inp.n_steps);
-  in_params.c1[0] =
-      r[0] * (in_params.u[0] - pow(inp.fwd / inp.spot, 1.0 / inp.n_steps)) /
-      (in_params.u[0] - 1 / in_params.u[0]);
-  in_params.c1[1] =
-      r[1] *(in_params.u[1] - pow((inp.fwd / d_df) / inp.spot, 1.0 / inp.n_steps)) /
-      (in_params.u[1] - 1 / in_params.u[1]);
-  in_params.c1[2] =
-      r[0] * (in_params.u[2] - pow(inp.fwd / inp.spot, 1.0 / inp.n_steps)) /
-      (in_params.u[2] - 1 / in_params.u[2]);
-  in_params.c2[0] = r[0] - in_params.c1[0];
-  in_params.c2[1] = r[1] - in_params.c1[1];
-  in_params.c2[2] = r[0] - in_params.c1[2];
+  double r;
+  if (type == 0 || type == 2)
+    r =  pow(inp.df, 1.0 / inp.n_steps);
+  else
+    r = pow(inp.df * d_df, 1.0 / inp.n_steps);
 
-  in_params.param_1[0] = inp.cp * in_params.umin[0];
-  in_params.param_1[1] = inp.cp * in_params.umin[1];
-  in_params.param_1[2] = inp.cp * in_params.umin[2];
-  in_params.param_2 = inp.cp * inp.strike;
+  if (type == 0 || type == 1)
+    in_params.u = exp(inp.vol * sqrt(inp.t / inp.n_steps));
+  else
+    in_params.u = exp((inp.vol + kEpsilon) * sqrt(inp.t / inp.n_steps));
+  in_params.u2 = in_params.u * in_params.u;
+
+  if (type == 0)
+    in_params.umin = inp.spot * pow(1 / in_params.u, inp.n_steps + kExtraStepsForOptionType0);
+  else
+    in_params.umin = inp.spot * pow(1 / in_params.u, inp.n_steps);
+
+  if (type == 0 || type == 2)
+    in_params.c1 =
+      r * (in_params.u - pow(inp.fwd / inp.spot, 1.0 / inp.n_steps)) /
+      (in_params.u - 1 / in_params.u);
+  else
+    in_params.c1 =
+      r *(in_params.u - pow((inp.fwd / d_df) / inp.spot, 1.0 / inp.n_steps)) /
+      (in_params.u - 1 / in_params.u);
+
+  in_params.c2 = r - in_params.c1;
 
   return in_params;
 }
 
-CRRArrayEles PrepareArrData(const CRRInParams &in) {
-  CRRArrayEles arr;
-
-  // Write in reverse t-direction to match kernel access pattern
-  for (int i = 0; i <= in.n_steps + kOpt0; ++i) {
-    for (int inner_func_index = 0; inner_func_index < 3; ++inner_func_index) {
-      arr.array_eles[i][inner_func_index].u2 = pow(in.u2[inner_func_index], i);
-      arr.array_eles[i][inner_func_index].p1powu =
-          in.param_1[inner_func_index] * pow(in.u[inner_func_index], i + 1);
-      arr.array_eles[i][inner_func_index].init_optval =
-          fmax(in.param_1[inner_func_index] * pow(in.u2[inner_func_index], i) -
-                   in.param_2, 0.0);
-    }
-  }
-
-  return arr;
-}
-
-// Metadata, used in the Kernel, is generated from the input data
-// Each CRR problem is split into 3 subproblems to calculate
-// each required option price separately
-void PrepareKernelData(vector<CRRInParams> &in_params,
-                       vector<CRRArrayEles> &array_params,
-                       vector<CRRMeta> &in_buff_params,
-                       vector<CRRPerStepMeta> &in_buff2_params,
-                       const int n_crrs) {
-
-  constexpr short offset = 0;
-
-  for (int wi_idx = offset, dst = offset * 3; wi_idx < n_crrs; ++wi_idx) {
-    CRRInParams &src_crr_params = in_params[wi_idx];
-
-    CRRArrayEles &src_crr_eles = array_params[wi_idx];
-
-    for (int inner_func_index = 0; inner_func_index < 3;
-         ++inner_func_index, ++dst) {
-      CRRMeta &dst_crr_meta = in_buff_params[dst];
-      CRRPerStepMeta &dst_crr_per_step_meta = in_buff2_params[dst];
-
-      dst_crr_meta.u = src_crr_params.u[inner_func_index];
-      dst_crr_meta.c1 = src_crr_params.c1[inner_func_index];
-      dst_crr_meta.c2 = src_crr_params.c2[inner_func_index];
-
-      dst_crr_meta.param_1 = src_crr_params.param_1[inner_func_index];
-      dst_crr_meta.param_2 = src_crr_params.param_2;
-
-      if (inner_func_index == 0) {
-        dst_crr_meta.n_steps = src_crr_params.n_steps + kOpt0;
-      } else {
-        dst_crr_meta.n_steps = src_crr_params.n_steps;
-      }
-      for (int i = 0; i <= kMaxNSteps2; ++i) {
-        dst_crr_per_step_meta.array_eles[i].u2 =
-            src_crr_eles.array_eles[i][inner_func_index].u2;
-        dst_crr_per_step_meta.array_eles[i].p1powu =
-            src_crr_eles.array_eles[i][inner_func_index].p1powu;
-        dst_crr_per_step_meta.array_eles[i].init_optval =
-            src_crr_eles.array_eles[i][inner_func_index].init_optval;
-      }
-    }
-  }
-}
-
-// Takes in the result from the kernel and stores the 3 option prices
-// belonging to the same CRR problem in one InterRes element
-void ProcessKernelResult(const vector<CRRResParams> &res_params,
-                         vector<InterRes> &postp_buff, const int n_crrs) {
-  constexpr int offset = 0;
-
-  for (int wi_idx = offset, src = offset * 3; wi_idx < n_crrs; ++wi_idx) {
-    InterRes &dst_res = postp_buff[wi_idx];
-
-    for (int inner_func_index = 0; inner_func_index < 3;
-         ++inner_func_index, ++src) {
-      const CRRResParams &src_res = res_params[src];
-
-      for (int i = 0; i < 4; ++i) {
-        if (inner_func_index == 0) {
-          dst_res.pgreek[i] = src_res.pgreek[i];
-        }
-      }
-
-      dst_res.vals[inner_func_index] = src_res.optval0;
-    }
-  }
-}
-
 // Computes the Premium and Greeks
-OutputRes ComputeOutput(const InputData &inp, const CRRInParams &in_params,
-                        const InterRes &res_params) {
-  double h;
-  OutputRes res;
-  h = inp.spot * (in_params.u2[0] - 1 / in_params.u2[0]);
-  res.value = res_params.pgreek[1];
-  res.delta = (res_params.pgreek[2] - res_params.pgreek[0]) / h;
-  res.gamma = 2 / h *
-              ((res_params.pgreek[2] - res_params.pgreek[1]) / inp.spot /
-                   (in_params.u2[0] - 1) -
-               (res_params.pgreek[1] - res_params.pgreek[0]) / inp.spot /
-                   (1 - (1 / in_params.u2[0])));
-  res.theta =
-      (res_params.vals[0] - res_params.pgreek[3]) / 4 / inp.t * inp.n_steps;
-  res.rho = (res_params.vals[1] - res.value) / kEpsilon;
-  res.vega = (res_params.vals[2] - res.value) / kEpsilon;
-  return res;
+vector<OutputRes> ComputeOutput(const vector<InputData> &inp,
+                                const vector<CRRInParams> &in_params,
+                                const vector<CRRResParams> &res_params) {
+  assert(in_params.size() == res_params.size());
+  assert(in_params.size() == (inp.size() * kNumOptionTypes));
+  vector<OutputRes> output_res(inp.size());
+
+  for (int i = 0; i < inp.size(); i++) {
+    int j = i*kNumOptionTypes;
+    double spot = inp[i].spot;
+    double t = inp[i].t;
+    int n_steps = inp[i].n_steps;
+    double h;
+    OutputRes res;
+    double u2_0 = in_params[j].u2;
+    h = spot * (u2_0 - 1 / u2_0);
+    res.value = res_params[j].pgreek[1];
+    res.delta = (res_params[j].pgreek[2] - res_params[j].pgreek[0]) / h;
+    res.gamma = 2 / h *
+                ((res_params[j].pgreek[2] - res_params[j].pgreek[1]) / spot /
+                     (u2_0 - 1) -
+                 (res_params[j].pgreek[1] - res_params[j].pgreek[0]) / spot /
+                     (1 - (1 / u2_0)));
+    res.theta =
+        (res_params[j].val - res_params[j].pgreek[3]) / 4 / t * n_steps;
+    res.rho = (res_params[j+1].val - res.value) / kEpsilon;
+    res.vega = (res_params[j+2].val - res.value) / kEpsilon;
+    output_res[i] = res;
+  }
+  return output_res;
+}
+
+vector<CRRResParams> ComputeGoldenResult(int n_crrs, const vector<InputData> &inp, const vector<CRRInParams> &vals) {
+
+  vector<CRRResParams> crr_res_params(n_crrs * kNumOptionTypes);
+  for (int i = 0; i < n_crrs; ++i) {
+    for (int j = 0; j < kNumOptionTypes; j++) {
+      int k = i*kNumOptionTypes + j;
+
+      CRRCompute(inp[i], vals[k], crr_res_params[k], (j == 0) /* option type 0 */);
+    }
+  }
+  return crr_res_params;
 }
 
 // Perform CRR solving using the CPU and compare FPGA resutls with CPU results
 // to test correctness.
-void TestCorrectness(int k, int n_crrs, bool &pass, const InputData &inp,
-                     CRRInParams &vals, const OutputRes &fpga_res) {
-  if (k == 0) {
-    std::cout << "\n============= Correctness Test ============= \n";
-    std::cout << "Running analytical correctness checks... \n";
-  }
+bool TestCorrectness(size_t n_crrs, vector<OutputRes> &fpga_res, vector<OutputRes> &cpu_res) {
 
-  // This CRR benchmark ensures a minimum 4 decimal points match between FPGA and CPU
-  // "threshold" is chosen to enforce this guarantee
+  // This CRR benchmark ensures a minimum 4 decimal points match
+  // between FPGA and CPU "threshold" is chosen to enforce this guarantee
   float threshold = 0.00001;
-  int i, j, q;
-  double x;
-  int n_steps = vals.n_steps;
-  int m = n_steps + kOpt0;
-  vector<double> pvalue(kMaxNSteps3);
-  vector<double> pvalue_1(kMaxNSteps1);
-  vector<double> pvalue_2(kMaxNSteps1);
-  vector<double> pgreek(5);
-  InterRes cpu_res_params;
-  OutputRes cpu_res;
 
-  // option value computed at each final node
-  x = vals.umin[0];
-  for (i = 0; i <= m; i++, x *= vals.u2[0]) {
-    pvalue[i] = fmax(inp.cp * (x - inp.strike), 0.0);
-  }
+  std::cout << "\n============= Correctness Test ============= \n";
+  std::cout << "Running analytical correctness checks... \n";
 
-  // backward recursion to evaluate option price
-  for (i = m - 1; i >= 0; i--) {
-    vals.umin[0] *= vals.u[0];
-    x = vals.umin[0];
-    for (j = 0; j <= i; j++, x *= vals.u2[0]) {
-      pvalue[j] = fmax(vals.c1[0] * pvalue[j] + vals.c2[0] * pvalue[j + 1],
-                       inp.cp * (x - inp.strike));
+  bool pass = true;
+  for (int i = 0; i < n_crrs; i++) {
+    if (abs(cpu_res[i].value - fpga_res[i].value) > threshold) {
+      pass = false;
+      std::cout << "fpga_res[" << i << "].value " << " = " << std::fixed
+                << std::setprecision(20) << fpga_res[i].value << "\n";
+      std::cout << "cpu_res[" << i << "].value " << " = " << std::fixed
+                << std::setprecision(20) << cpu_res[i].value << "\n";
+      std::cout << "Mismatch detected for value of crr " << i << "\n";
     }
-    if (i == 4) {
-      pgreek[4] = pvalue[2];
+    if (abs(cpu_res[i].delta - fpga_res[i].delta) > threshold) {
+      pass = false;
+      std::cout << "fpga_res[" << i << "].delta " << " = " << std::fixed
+                << std::setprecision(20) << fpga_res[i].delta << "\n";
+      std::cout << "cpu_res[" << i << "].delta " << " = " << std::fixed
+                << std::setprecision(20) << cpu_res[i].delta << "\n";
+      std::cout << "Mismatch detected for value of crr " << i << "\n";
     }
-    if (i == 2) {
-      for (q = 0; q <= 2; q++) {
-        pgreek[q + 1] = pvalue[q];
-      }
+    if (abs(cpu_res[i].gamma - fpga_res[i].gamma) > threshold) {
+      pass = false;
+      std::cout << "fpga_res[" << i << "].gamma " << " = " << std::fixed
+                << std::setprecision(20) << fpga_res[i].gamma << "\n";
+      std::cout << "cpu_res[" << i << "].gamma " << " = " << std::fixed
+                << std::setprecision(20) << cpu_res[i].gamma << "\n";
+      std::cout << "Mismatch detected for value of crr " << "\n";
     }
-  }
-  cpu_res_params.vals[0] = pvalue[0];
-
-  // the above computation is repeated for each option price
-  x = vals.umin[1];
-  for (i = 0; i <= n_steps; i++, x *= vals.u2[1]) {
-    pvalue_1[i] = fmax(inp.cp * (x - inp.strike), 0.0);
-  }
-
-  for (i = n_steps - 1; i >= 0; i--) {
-    vals.umin[1] *= vals.u[1];
-    x = vals.umin[1];
-
-    for (j = 0; j <= i; j++, x *= vals.u2[1]) {
-      pvalue_1[j] =
-          fmax(vals.c1[1] * pvalue_1[j] + vals.c2[1] * pvalue_1[j + 1],
-               inp.cp * (x - inp.strike));
+    if (abs(cpu_res[i].vega - fpga_res[i].vega) > threshold) {
+      pass = false;
+      std::cout << "fpga_res[" << i << "].vega " << " = " << std::fixed
+                << std::setprecision(20) << fpga_res[i].vega << "\n";
+      std::cout << "cpu_res[" << i << "].vega " << " = " << std::fixed
+                << std::setprecision(20) << cpu_res[i].vega << "\n";
+      std::cout << "Mismatch detected for value of crr " << "\n";
     }
-  }
-  cpu_res_params.vals[1] = pvalue_1[0];
-
-  x = vals.umin[2];
-  for (i = 0; i <= n_steps; i++, x *= vals.u2[2]) {
-    pvalue_2[i] = fmax(inp.cp * (x - inp.strike), 0.0);
-  }
-
-  for (i = n_steps - 1; i >= 0; i--) {
-    vals.umin[2] *= vals.u[2];
-    x = vals.umin[2];
-    for (j = 0; j <= i; j++, x *= vals.u2[2]) {
-      pvalue_2[j] =
-          fmax(vals.c1[2] * pvalue_2[j] + vals.c2[2] * pvalue_2[j + 1],
-               inp.cp * (x - inp.strike));
+    if (abs(cpu_res[i].theta - fpga_res[i].theta) > threshold) {
+      pass = false;
+      std::cout << "fpga_res[" << i << "].theta " << " = " << std::fixed
+                << std::setprecision(20) << fpga_res[i].theta << "\n";
+      std::cout << "cpu_res[" << i << "].theta " << " = " << std::fixed
+                << std::setprecision(20) << cpu_res[i].theta << "\n";
+      std::cout << "Mismatch detected for value of crr " << "\n";
+    }
+    if (abs(cpu_res[i].rho - fpga_res[i].rho) > threshold) {
+      pass = false;
+      std::cout << "fpga_res[" << i << "].rho " << " = " << std::fixed
+                << std::setprecision(20) << fpga_res[i].rho << "\n";
+      std::cout << "cpu_res[" << i << "].rho " << " = " << std::fixed
+                << std::setprecision(20) << cpu_res[i].rho << "\n";
+      std::cout << "Mismatch detected for value of crr " << "\n";
     }
   }
-  cpu_res_params.vals[2] = pvalue_2[0];
-  pgreek[0] = 0;
 
-  for (i = 1; i < 5; ++i) {
-    cpu_res_params.pgreek[i - 1] = pgreek[i];
-  }
-
-  cpu_res = ComputeOutput(inp, vals, cpu_res_params);
-
-  if (abs(cpu_res.value - fpga_res.value) > threshold) {
-    pass = false;
-    std::cout << "fpga_res.value " << k << " = " << std::fixed
-              << std::setprecision(20) << fpga_res.value << "\n";
-    std::cout << "cpu_res.value " << k << " = " << std::fixed
-              << std::setprecision(20) << cpu_res.value << "\n";
-    std::cout << "Mismatch detected for value of crr " << k << "\n";
-  }
-  if (abs(cpu_res.delta - fpga_res.delta) > threshold) {
-    pass = false;
-    std::cout << "fpga_res.delta " << k << " = " << std::fixed
-              << std::setprecision(20) << fpga_res.delta << "\n";
-    std::cout << "cpu_res.delta " << k << " = " << std::fixed
-              << std::setprecision(20) << cpu_res.delta << "\n";
-    std::cout << "Mismatch detected for value of crr " << k << "\n";
-  }
-  if (abs(cpu_res.gamma - fpga_res.gamma) > threshold) {
-    pass = false;
-    std::cout << "fpga_res.gamma " << k << " = " << std::fixed
-              << std::setprecision(20) << fpga_res.gamma << "\n";
-    std::cout << "cpu_res.gamma " << k << " = " << std::fixed
-              << std::setprecision(20) << cpu_res.gamma << "\n";
-    std::cout << "Mismatch detected for value of crr " << k << "\n";
-  }
-  if (abs(cpu_res.vega - fpga_res.vega) > threshold) {
-    pass = false;
-    std::cout << "fpga_res.vega " << k << " = " << std::fixed
-              << std::setprecision(20) << fpga_res.vega << "\n";
-    std::cout << "cpu_res.vega " << k << " = " << std::fixed
-              << std::setprecision(20) << cpu_res.vega << "\n";
-    std::cout << "Mismatch detected for value of crr " << k << "\n";
-  }
-  if (abs(cpu_res.theta - fpga_res.theta) > threshold) {
-    pass = false;
-    std::cout << "fpga_res.theta " << k << " = " << std::fixed
-              << std::setprecision(20) << fpga_res.theta << "\n";
-    std::cout << "cpu_res.theta " << k << " = " << std::fixed
-              << std::setprecision(20) << cpu_res.theta << "\n";
-    std::cout << "Mismatch detected for value of crr " << k << "\n";
-  }
-  if (abs(cpu_res.rho - fpga_res.rho) > threshold) {
-    pass = false;
-    std::cout << "fpga_res.rho " << k << " = " << std::fixed
-              << std::setprecision(20) << fpga_res.rho << "\n";
-    std::cout << "cpu_res.rho " << k << " = " << std::fixed
-              << std::setprecision(20) << cpu_res.rho << "\n";
-    std::cout << "Mismatch detected for value of crr " << k << "\n";
-  }
-
-  if (k == n_crrs - 1) {
-    std::cout << "CPU-FPGA Equivalence: " << (pass ? "PASS" : "FAIL") << "\n";
-  }
+  std::cout << "CPU-FPGA Equivalence: " << (pass ? "PASS" : "FAIL") << "\n";
+  return pass;
 }
 
 // Print out the achieved CRR throughput
@@ -712,150 +379,95 @@ void TestThroughput(const double &time, const int &n_crrs) {
             << (n_crrs / time) << " assets/s\n";
 }
 
+bool ValidateFilename(string filename) {
+  std::size_t found = filename.find_last_of(".");
+  return (filename.substr(found + 1).compare("csv") == 0);
+}
+
 int main(int argc, char *argv[]) {
   string infilename = "";
   string outfilename = "";
 
   const string default_ifile = "src/data/ordered_inputs.csv";
   const string default_ofile = "src/data/ordered_outputs.csv";
+  const string golden_ifile = "src/data/golden_result.csv";
 
-  char str_buffer[kMaxStringLen] = {0};
+  char *user_infile = nullptr;
+  char user_outfile[kMaxFilenameLen] = {0};
   for (int i = 1; i < argc; i++) {
     if (argv[i][0] == '-') {
-      string sarg(argv[i]);
-
-      FindGetArgString(sarg, "-o=", str_buffer, kMaxStringLen);
-      FindGetArgString(sarg, "--output-file=", str_buffer, kMaxStringLen);
+      GetArgValue(argv[i], "-o=", user_outfile, kMaxFilenameLen);
+      GetArgValue(argv[i], "--output-file=", user_outfile, kMaxFilenameLen);
     } else {
-      infilename = string(argv[i]);
+      user_infile = argv[i];
     }
   }
 
-  try {
+  infilename = (user_infile == nullptr) ? default_ifile : user_infile;
+  // Check input file format
+  if (!ValidateFilename(infilename)) {
+    std::cerr << "Input file must be a .csv file.\n";
+    return 1;
+  }
+  outfilename = strlen(user_outfile) ? user_outfile : default_ofile;
+  if (!ValidateFilename(outfilename)) {
+    std::cerr << "Output file must be a .csv file.\n";
+    return 1;
+  }
 
-#if FPGA_SIMULATOR
-    auto selector = sycl::ext::intel::fpga_simulator_selector_v;
-#elif FPGA_HARDWARE
-    auto selector = sycl::ext::intel::fpga_selector_v;
-#else  // #if FPGA_EMULATOR
-    auto selector = sycl::ext::intel::fpga_emulator_selector_v;
+  vector<InputData> inp;
+  vector<OutputRes> golden_res_from_file;
+
+  ifstream inputFile(infilename);
+  if (!inputFile.is_open()) {
+    std::cerr << "Input file doesn't exist \n";
+    return 1;
+  }
+  // Read inputs data from input file
+  ReadInputFromFile(inputFile, inp);
+
+  ifstream goldenFile(golden_ifile);
+  if (!goldenFile.is_open()) {
+    std::cerr << "Golden result file doesn't exist\n";
+    return 1;
+  }
+  ReadGoldenResultFromFile(goldenFile, golden_res_from_file);
+
+  const int n_crrs = inp.size();
+
+  vector<CRRInParams> in_params(n_crrs * kNumOptionTypes);
+
+  for (int j = 0; j < n_crrs; ++j) {
+    for (int k = 0; k < kNumOptionTypes; k++) {
+      in_params[j*kNumOptionTypes + k] = PrepareOptionType(k, inp[j]);
+    }
+  }
+
+  vector<CRRResParams> fpga_res_params(n_crrs * kNumOptionTypes);
+  vector<CRRResParams> res_dummy(n_crrs * kNumOptionTypes);
+
+  double kernel_time = 0;
+
+  try {
+#if defined(FPGA_EMULATOR)
+    ext::intel::fpga_emulator_selector device_selector;
+#else
+    ext::intel::fpga_selector device_selector;
 #endif
 
-    queue q(selector, fpga_tools::exception_handler);
+    queue q(device_selector, dpc_common::exception_handler);
+
+    std::cout << "Running on device:  "
+              << q.get_device().get_info<info::device::name>().c_str() << "\n";
 
     device device = q.get_device();
+    std::cout << "Device name: "
+              << device.get_info<info::device::name>().c_str() << "\n \n \n";
 
-    std::cout << "Running on device: "
-              << device.get_info<info::device::name>().c_str() 
-              << std::endl;
-
-    vector<InputData> inp;
-
-    // Get input file name, if users don't have their test input file, this
-    // design will use the default input file
-    if (infilename == "") {
-      infilename = default_ifile;
-    }
-    ifstream inputFile(infilename);
-
-    if (!inputFile.is_open()) {
-      std::cerr << "Input file doesn't exist \n";
-      return 1;
-    }
-
-    // Check input file format
-    string filename = infilename;
-    std::size_t found = filename.find_last_of(".");
-    if (!(filename.substr(found + 1).compare("csv") == 0)) {
-      std::cerr << "Input file format only support .csv\n";
-      return 1;
-    }
-
-    // Get output file name, if users don't define output file name, the design
-    // will use the default output file
-    outfilename = default_ofile;
-    if (strlen(str_buffer)) {
-      outfilename = string(str_buffer);
-    }
-
-    // Check output file format
-    filename = outfilename;
-    found = filename.find_last_of(".");
-    if (!(filename.substr(found + 1).compare("csv") == 0)) {
-      std::cerr << "Output file format only support .csv\n";
-      return 1;
-    }
-
-    // Read inputs data from input file
-    ReadInputFromFile(inputFile, inp);
-
-// Get the number of data from the input file
-// Emulator mode only goes through one input (or through OUTER_UNROLL inputs) to
-// ensure fast runtime
-#if defined(FPGA_EMULATOR)
-    int temp_crrs = 1;
-#else
-    int temp_crrs = inp.size();
-#endif
-
-    // Check if n_crrs >= OUTER_UNROLL
-    if (OUTER_UNROLL >= temp_crrs) {
-      if (inp.size() < OUTER_UNROLL) {
-        std::cerr << "Input size must be greater than or equal to OUTER_UNROLL\n";
-        return 1;
-      } else {
-        temp_crrs = OUTER_UNROLL;
-      }
-    }
-
-    const int n_crrs = temp_crrs;
-
-    vector<CRRInParams> in_params(n_crrs);
-    vector<CRRArrayEles> array_params(n_crrs);
-
-    for (int j = 0; j < n_crrs; ++j) {
-      in_params[j] = PrepareData(inp[j]);
-      array_params[j] = PrepareArrData(in_params[j]);
-    }
-
-    // following vectors are arguments for CrrSolver
-    vector<CRRMeta> in_buff_params(n_crrs * 3);
-    vector<CRRPerStepMeta> in_buff2_params(n_crrs * 3);
-
-    // Prepare metadata as input to kernel
-    PrepareKernelData(in_params, array_params, in_buff_params, in_buff2_params,
-                      n_crrs);
-
-#ifdef FPGA_HARDWARE
     // warmup run - use this run to warmup accelerator
-    vector<CRRResParams> res_params_dummy(n_crrs * 3);
-    CrrSolver(n_crrs, in_buff_params, res_params_dummy, in_buff2_params,
-               q);
-#endif
-
+    CrrSolver(n_crrs, inp, in_params, res_dummy, q);
     // Timed run - profile performance
-    vector<CRRResParams> res_params(n_crrs * 3);
-    double time = CrrSolver(n_crrs, in_buff_params, res_params,
-                             in_buff2_params, q);
-    bool pass = true;
-
-    // Postprocessing step
-    // process_res used to compute final results
-    vector<InterRes> process_res(n_crrs);
-    ProcessKernelResult(res_params, process_res, n_crrs);
-
-    vector<OutputRes> result(n_crrs);
-    for (int i = 0; i < n_crrs; ++i) {
-      result[i] = ComputeOutput(inp[i], in_params[i], process_res[i]);
-      TestCorrectness(i, n_crrs, pass, inp[i], in_params[i], result[i]);
-    }
-
-    // Write outputs data to output file
-    ofstream outputFile(outfilename);
-
-    WriteOutputToFile(outputFile, result);
-
-    TestThroughput(time, n_crrs);
+    kernel_time = CrrSolver(n_crrs, inp, in_params, fpga_res_params, q);
 
   } catch (sycl::exception const &e) {
     std::cerr << "Caught a synchronous SYCL exception: " << e.what() << "\n";
@@ -866,5 +478,31 @@ int main(int argc, char *argv[]) {
                  "-DFPGA_EMULATOR\n";
     return 1;
   }
-  return 0;
+
+  // Compute the premium and greeks
+  vector<OutputRes> fpga_res = ComputeOutput(inp, in_params, fpga_res_params);
+
+  // Compute golden result on CPU
+  vector<CRRResParams> cpu_res_params = ComputeGoldenResult(n_crrs, inp, in_params);
+  vector<OutputRes> golden = ComputeOutput(inp, in_params, cpu_res_params);
+
+  bool pass = TestCorrectness(n_crrs, fpga_res, golden);
+
+  // Guard against changes creeping into the CPU golden calculation
+  bool passes_file_test = TestCorrectness(n_crrs, fpga_res, golden_res_from_file);
+  if (!passes_file_test) {
+    std::cerr << "FPGA result does not match data/golden_result.csv\n" << std::endl;
+  }
+
+  // Write output data to output file
+  ofstream outputFile(outfilename);
+
+  WriteOutputToFile(outputFile, fpga_res);
+
+  TestThroughput(kernel_time, n_crrs);
+  if ((!pass) || (!passes_file_test)) {
+    return 1;
+  }
+
+ return 0;
 }

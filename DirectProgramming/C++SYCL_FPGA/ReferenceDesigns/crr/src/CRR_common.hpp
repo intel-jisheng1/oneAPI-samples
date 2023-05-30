@@ -29,78 +29,70 @@
 #ifndef __CRR_COMMON_H__
 #define __CRR_COMMON_H__
 
-constexpr int kMaxStringLen = 1024;
+constexpr int kMaxFilenameLen = 1024;
 
-// Increments of kMaxNSteps
+// Maximum number of time steps in the binomial tree
 constexpr size_t kMaxNSteps  = 8189;
-constexpr size_t kMaxNSteps1 = 8190;
-constexpr size_t kMaxNSteps2 = 8191;
-constexpr size_t kMaxNSteps3 = 8192;
+// Increments of kMaxNSteps
+constexpr size_t kMaxNSteps1 = kMaxNSteps + 1;
+constexpr size_t kMaxNSteps2 = kMaxNSteps + 2;
+constexpr size_t kMaxNSteps3 = kMaxNSteps + 3;
 
-// Increment by a small epsilon in order to compute derivative 
+// Increment by a small epsilon in order to compute derivative
 // of option price with respect to Vol or Interest. The derivatives
-// are then used to compute Vega and Rho. 
+// are then used to compute Vega and Rho.
 constexpr double kEpsilon  = 0.0001;
 
 // Whenever calculations are made for Option Price 0, need to increment
 // nsteps by 2 to ensure all the required derivative prices are calculated.
-constexpr size_t kOpt0 = 2;
+constexpr size_t kExtraStepsForOptionType0 = 2;
 
-
-// Solver configuration settings that are dependent on selected
-// board. Most notable settings are:
-
-// OUTER_UNROLL controls the number of CRRs that can be processed
-// in parallel in a SIMD fashion (number of CRRS must be >= OUTER_UNROLL). 
-// This is ideally a power of two, but does not have to be. Since 
-// the DRAM bandwidth requirement is low, increasing OUTER_UNROLL 
-// should result in fairly linear speedup. (max: 32 on PAC A10)
-
-// INNER_UNROLL controls the degree of parallelization within
-// the calculation of a single CRR. This must be a power of two. Increasing
-// INNER_UNROLL has a lower area overhead than increasing OUTER_UNROLL;
-// however, there are diminishing returns as INNER_UNROLL is increased with
-// respect to the number of time steps. (max: 128 on PAC A10)
-
+// Each CRR problem is split into 3 subproblems to calculate
+// each required option price separately
+// Calculate 3 binomial trees, each used for different greeks
+// Three different option prices are required to solve each CRR problem
+// The following lists why each option price is required:
+// [0] : Used to compute Premium, Delta, Gamma and Theta
+// [1] : Used to compute Rho
+// [2] : Used to compute Vega
+constexpr size_t kNumOptionTypes = 3;
 
 // Data structure for original input data.
+// The order of fields in this struct matches the order of columns in the
+// input csv file.
 typedef struct {
-  int cp;         /* cp = -1 or 1 for Put & Call respectively. */
   double n_steps; /* n_steps = number of time steps in the binomial tree. */
-  double strike;  /* strike = exercise price of option. */
+  int cp;         /* cp = -1 or 1 for Put & Call respectively. */
   double spot;    /* spot = spot price of the underlying. */
   double fwd;     /* fwd = forward price of the underlying. */
+  double strike;  /* strike = exercise price of option. */
   double vol;     /* vol = per cent volatility, input as a decimal. */
   double df;      /* df = discount factor to option expiry. */
   double t;       /* t = time in years to the maturity of the option. */
 
 } InputData;
 
-// Data structure as the inputs to FPGA.
-// Element[i] is used to compute option_price[i]. 
+// Pre-processed input for one option type
 typedef struct {
-  double n_steps;   /* n_steps = number of time steps in the binomial tree. */
-  double u[3];      /* u = the increase factor of a up movement in the binomial tree,
-                       same for each time step. */
-  double u2[3];     /* u2 = the square of increase factor. */
-  double c1[3];     /* c1 = the probality of a down movement in the binomial tree,
-                       same for each time step. */
-  double c2[3];     /* c2 = the probality of a up movement in the binomial tree. */
-  double umin[3];   /* umin = minimum price of the underlying at the maturity. */
-  double param_1[3];/* param_1[i] = cp * umin[i] */ 
-  double param_2;   /* param_2 = cp * strike */
+  double n_steps; /* n_steps = number of time steps in the binomial tree. */
+  double u;       /* u = the increase factor of a up movement in the binomial tree,
+                         same for each time step. */
+  double u2;      /* u2 = the square of increase factor. */
+  double c1;      /* c1 = the probality of a down movement in the binomial tree,
+                          same for each time step. */
+  double c2;      /* c2 = the probality of a up movement in the binomial tree. */
+  double umin;    /* umin = minimum price of the underlying at the maturity. */
 
 } CRRInParams;
 
-// Data structure as the output from ProcessKernelResult().
+// Output of the kernel
 typedef struct {
-  double pgreek[4]; /* Stores the 4 derivative prices in the binomial tree 
-                       required to compute the Premium and Greeks. */
-  double vals[3];   /* Three option prices calculated */
+  double pgreek[4];               /* Stores the 4 derivative prices in the binomial tree
+                                     required to compute the Premium and Greeks. */
+  double val;                     /* option price calculated */
 
-} InterRes;
+} CRRResParams;
 
-// Data structure for option price and five Greeks.
 typedef struct {
   double value; /* value = option price. */
   double delta;
@@ -109,41 +101,5 @@ typedef struct {
   double theta;
   double rho;
 } OutputRes;
-
-// Data structures required by the kernel
-typedef struct {
-  double u;
-  double c1;
-  double c2;
-  double param_1;
-  double param_2;
-  short n_steps;
-  short pad1;
-  int pad2;
-  double pad3;
-  double pad4;
-} CRRMeta;
-
-typedef struct {
-  double u2;
-  double p1powu;
-  double init_optval;
-  double pad;
-} ArrayEle;
-
-typedef struct {
-  ArrayEle array_eles[kMaxNSteps3][3]; /* Second dimension size set to 3 to have a 
-                                          separate ArrayEle for each option price */
-} CRRArrayEles;
-
-typedef struct {
-  ArrayEle array_eles[kMaxNSteps3];
-} CRRPerStepMeta;
-
-typedef struct {
-  double pgreek[4];
-  double optval0;
-  double pad[3];
-} CRRResParams;
 
 #endif
