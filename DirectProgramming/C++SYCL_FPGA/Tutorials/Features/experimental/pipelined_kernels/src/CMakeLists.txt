@@ -39,16 +39,18 @@ else()
    message(FATAL_ERROR "The INTELFPGAOCLSDKROOT environment variable must be defined for this tutorial to compile.")
 endif()
 
+set(ATTRIBUTE_FLAGS "-std=c++23 -DDISABLE_SYCL_EXT_ANNOTATED_INTERFACES -DDISABLE_SYCL_EXT_KERNEL_CONTROL_PROPERTIES")
+
 # A DPC++ ahead-of-time (AoT) compile processes the device code in two stages.
 # 1. The "compile" stage compiles the device code to an intermediate representation (SPIR-V).
 # 2. The "link" stage invokes the compiler's FPGA backend before linking.
 #    For this reason, FPGA backend flags must be passed as link flags in CMake.
 include_directories(${SDK_ROOT_PATH}/include/)
-set(EMULATOR_COMPILE_FLAGS "-fsycl -fintelfpga -Wall -Wno-c++2b-extensions ${WIN_FLAG} -DFPGA_EMULATOR")
+set(EMULATOR_COMPILE_FLAGS "-fsycl -fintelfpga -Wall ${ATTRIBUTE_FLAGS} ${WIN_FLAG} -DFPGA_EMULATOR")
 set(EMULATOR_LINK_FLAGS "-fsycl -fintelfpga")
-set(SIMULATOR_COMPILE_FLAGS "-fsycl -fintelfpga -Wall -Wno-c++2b-extensions ${WIN_FLAG} -DFPGA_SIMULATOR")
+set(SIMULATOR_COMPILE_FLAGS "-fsycl -fintelfpga -Wall ${ATTRIBUTE_FLAGS} ${WIN_FLAG} -DFPGA_SIMULATOR")
 set(SIMULATOR_LINK_FLAGS "-fsycl -fintelfpga -Xssimulation -Xsghdl -Xstarget=${FPGA_DEVICE} ${USER_HARDWARE_FLAGS}")
-set(HARDWARE_COMPILE_FLAGS "-fsycl -fintelfpga -Wall -Wno-c++2b-extensions ${WIN_FLAG} -DFPGA_HARDWARE")
+set(HARDWARE_COMPILE_FLAGS "-fsycl -fintelfpga -Wall ${ATTRIBUTE_FLAGS} ${WIN_FLAG} -DFPGA_HARDWARE")
 set(HARDWARE_LINK_FLAGS "-fsycl -fintelfpga -Xshardware -Xstarget=${FPGA_DEVICE} ${USER_HARDWARE_FLAGS}")
 
 ###############################################################################
