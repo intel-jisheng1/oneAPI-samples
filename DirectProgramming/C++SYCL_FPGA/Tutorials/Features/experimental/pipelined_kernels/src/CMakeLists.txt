@@ -40,7 +40,6 @@ else()
 endif()
 
 if(WIN32)
-    set(STD_FLAG "/std:c++23")
 else()
     set(STD_FLAG "-std=c++23")
 endif()
