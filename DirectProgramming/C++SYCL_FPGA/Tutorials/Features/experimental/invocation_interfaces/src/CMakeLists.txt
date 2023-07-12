@@ -58,9 +58,7 @@ else()
    message(FATAL_ERROR "The INTELFPGAOCLSDKROOT environment variable must be defined for this tutorial to compile.")
 endif()
 
-if(WIN32)
-    set(STD_FLAG "/std:c++23")
-else()
+if(NOT WIN32)
     set(STD_FLAG "-std=c++23")
 endif()
 
