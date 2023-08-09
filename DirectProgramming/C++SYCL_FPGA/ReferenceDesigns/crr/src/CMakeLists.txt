@@ -79,7 +79,8 @@ set(HARDWARE_LINK_FLAGS "-fsycl -fintelfpga -Xshardware -Xsdaz -Xsrounding=faith
 
 # Copy input data
 configure_file("data/ordered_inputs.csv" "data/ordered_inputs.csv" COPYONLY)
-configure_file("data/ordered_inputs.csv" "data/small_ordered_inputs.csv" COPYONLY)
+configure_file("data/small_ordered_inputs.csv" "data/small_ordered_inputs.csv" COPYONLY)
+configure_file("data/golden_result.csv" "data/golden_result.csv" COPYONLY)
 
 ###############################################################################
 ### FPGA Emulator

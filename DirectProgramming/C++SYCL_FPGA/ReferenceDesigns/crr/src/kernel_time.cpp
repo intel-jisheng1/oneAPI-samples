@@ -56,13 +56,12 @@ class CRRSolver;
 // void CRRCompute(const InputData &inp, const CRRInParams &in_params, CRRResParams &res_params, bool optionType0, double * pvalue) {
 void CRRCompute(const InputData &inp, const CRRInParams &in_params, CRRResParams &res_params, bool optionType0, int n_steps) {
 
-   [[intel::private_copies(10)]] double pvalue[kMaxNSteps3];
-   [[intel::private_copies(10)]] double umin_arr[kMaxNSteps3];
+   [[intel::private_copies(8)]] double pvalue[kMaxNSteps3];
 
   //  int n_steps = in_params.n_steps;
   //  if (optionType0) n_steps += kExtraStepsForOptionType0;
 
-   [[intel::private_copies(10)]] double umin = in_params.umin;
+   double umin = in_params.umin;
    // option value computed at each final node
    for (int i = 0; i <= n_steps; i++) {
       bool do_useful_things_this_iter = (optionType0 || (i <= n_steps - kExtraStepsForOptionType0));
@@ -74,35 +73,22 @@ void CRRCompute(const InputData &inp, const CRRInParams &in_params, CRRResParams
         pvalue[i] = pvalue[i];
       }
    }
-  
-    [[intel::private_copies(10)]] double new_umin = in_params.umin;
-   for(int i = n_steps - 1; i >= 0; i--) {
-    bool do_useful_things_this_outer_iter = (optionType0 || (i < n_steps - kExtraStepsForOptionType0));
-    if(do_useful_things_this_outer_iter){
-      new_umin *= in_params.u;
-      umin_arr[i] = new_umin;
-    } else {
-      umin_arr[i] = 0.0;
-    }
-   }
 
-  //  [[intel::private_copies(10)]] double new_umin = in_params.umin;
+   double new_umin = in_params.umin;
    // backward recursion to evaluate option price
-   [[intel::initiation_interval(4)]] [[intel::ivdep(4)]]
    for (int i = n_steps - 1; i >= 0; i--) {
      bool do_useful_things_this_outer_iter = (optionType0 || (i < n_steps - kExtraStepsForOptionType0));
-    //  if(do_useful_things_this_outer_iter){
-    //   new_umin *= in_params.u;
-    //   umin = new_umin;
-    //  }
-     double this_umin = umin_arr[i];
+     if(do_useful_things_this_outer_iter){
+      new_umin *= in_params.u;
+      umin = new_umin;
+     }
      for (int j = 0; j <= n_steps - 1; j++) {
         bool do_useful_things_this_inner_iter = (optionType0 || (j < n_steps - kExtraStepsForOptionType0)) && do_useful_things_this_outer_iter;
 
         if(do_useful_things_this_inner_iter) {
           double temp = pvalue[j];
           double value1 = in_params.c1 * temp + in_params.c2 * pvalue[j + 1];
-          double value2 = inp.cp * (this_umin - inp.strike);
+          double value2 = inp.cp * (umin - inp.strike);
           double result = (j <= i) ? sycl::fmax(value1, value2) : temp;
           pvalue[j] = result;
 
@@ -113,20 +99,11 @@ void CRRCompute(const InputData &inp, const CRRInParams &in_params, CRRResParams
             // pgreek will only be used if this option is of type 0
             res_params.pgreek[3] = result;
           }
-          if(i == 2 && j == 0) {
-            res_params.pgreek[0] = result;
+          if(i == 2 && j <= 2) {
+            res_params.pgreek[j] = result;
           }
-          if(i == 2 && j == 1) {
-            res_params.pgreek[1] = result;
-          }
-          if(i == 2 && j == 2) {
-            res_params.pgreek[2] = result;
-          }
-          // if(i == 2 && j <= 2) {
-          //   res_params.pgreek[j] = result;
-          // }
 
-          this_umin *= in_params.u2;
+          umin *= in_params.u2;
         } else {
           pvalue[j] = pvalue[j];
         }
@@ -140,7 +117,6 @@ auto KernelRuntime(event e) {
 
   return (end - start) / 1000000.0f;
 }
-
 
 double CrrSolver(const int n_crrs,
                  const vector<InputData> &inp,
@@ -174,7 +150,7 @@ double CrrSolver(const int n_crrs,
           int k = i*kNumOptionTypes + j;
           CRRInParams vals = accessor_i[k];
 
-          [[intel::private_copies(10)]] CRRResParams res_params;
+          CRRResParams res_params;
           // CRRCompute(inp, vals, res_params, (j == 0) /* option type 0 */, pvalue_p[k]);
           CRRCompute(inp, vals, res_params, (j == 0) /* option type 0 */, n_steps);
 
@@ -184,20 +160,14 @@ double CrrSolver(const int n_crrs,
     });
   });
 
-    auto kernel_time = KernelRuntime(e);
+  auto kernel_time = KernelRuntime(e);
 
   // auto end = std::chrono::high_resolution_clock::now();
   // double diff = std::chrono::duration<double, std::milli>(end - start).count();
   return kernel_time;
-
 }
 
-#if FPGA_SIMULATOR
-#define MAX_COUNT 4
-#else
 #define MAX_COUNT 10
-#endif
-
 
 void ReadInputFromFile(ifstream &input_file, vector<InputData> &inp) {
   string line_of_args;
@@ -569,7 +539,6 @@ int main(int argc, char *argv[]) {
     queue q(selector, fpga_tools::exception_handler,
             property::queue::enable_profiling{});
 
-
     std::cout << "Running on device:  "
               << q.get_device().get_info<info::device::name>().c_str() << "\n";
 
@@ -585,6 +554,35 @@ int main(int argc, char *argv[]) {
     // Timed run - profile performance
     kernel_time = CrrSolver(n_crrs, inp, in_params, fpga_res_params, q);
     std::cout << "Kernel took " << kernel_time <<" ms.\n";
+    
+    // vector<CRRResParams> res_dummy1(n_crrs * kNumOptionTypes);
+    // vector<CRRResParams> res_dummy2(n_crrs * kNumOptionTypes);
+    // vector<CRRResParams> res_dummy3(n_crrs * kNumOptionTypes);
+    // vector<CRRResParams> res_dummy4(n_crrs * kNumOptionTypes);
+    // vector<CRRResParams> res_dummy5(n_crrs * kNumOptionTypes);
+    // vector<CRRResParams> res_dummy6(n_crrs * kNumOptionTypes);
+    // vector<CRRResParams> res_dummy7(n_crrs * kNumOptionTypes);
+
+    // kernel_time = CrrSolver(n_crrs, inp, in_params, res_dummy1, q);
+    // std::cout << "Kernel took " << kernel_time <<" ms.\n";
+    
+    // kernel_time = CrrSolver(n_crrs, inp, in_params, res_dummy2, q);
+    // std::cout << "Kernel took " << kernel_time <<" ms.\n";
+    
+    // kernel_time = CrrSolver(n_crrs, inp, in_params, res_dummy3, q);
+    // std::cout << "Kernel took " << kernel_time <<" ms.\n";
+    
+    // kernel_time = CrrSolver(n_crrs, inp, in_params, res_dummy4, q);
+    // std::cout << "Kernel took " << kernel_time <<" ms.\n";
+    
+    // kernel_time = CrrSolver(n_crrs, inp, in_params, res_dummy5, q);
+    // std::cout << "Kernel took " << kernel_time <<" ms.\n";
+    
+    // kernel_time = CrrSolver(n_crrs, inp, in_params, res_dummy6, q);
+    // std::cout << "Kernel took " << kernel_time <<" ms.\n";
+    
+    // kernel_time = CrrSolver(n_crrs, inp, in_params, res_dummy7, q);
+    // std::cout << "Kernel took " << kernel_time <<" ms.\n";
 
   } catch (sycl::exception const &e) {
     std::cerr << "Caught a synchronous SYCL exception: " << e.what() << "\n";

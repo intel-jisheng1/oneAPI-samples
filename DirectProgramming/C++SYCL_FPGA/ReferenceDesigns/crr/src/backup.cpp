@@ -88,7 +88,6 @@ void CRRCompute(const InputData &inp, const CRRInParams &in_params, CRRResParams
 
   //  [[intel::private_copies(10)]] double new_umin = in_params.umin;
    // backward recursion to evaluate option price
-   [[intel::initiation_interval(4)]] [[intel::ivdep(4)]]
    for (int i = n_steps - 1; i >= 0; i--) {
      bool do_useful_things_this_outer_iter = (optionType0 || (i < n_steps - kExtraStepsForOptionType0));
     //  if(do_useful_things_this_outer_iter){
@@ -113,18 +112,9 @@ void CRRCompute(const InputData &inp, const CRRInParams &in_params, CRRResParams
             // pgreek will only be used if this option is of type 0
             res_params.pgreek[3] = result;
           }
-          if(i == 2 && j == 0) {
-            res_params.pgreek[0] = result;
+          if(i == 2 && j <= 2) {
+            res_params.pgreek[j] = result;
           }
-          if(i == 2 && j == 1) {
-            res_params.pgreek[1] = result;
-          }
-          if(i == 2 && j == 2) {
-            res_params.pgreek[2] = result;
-          }
-          // if(i == 2 && j <= 2) {
-          //   res_params.pgreek[j] = result;
-          // }
 
           this_umin *= in_params.u2;
         } else {
@@ -134,20 +124,12 @@ void CRRCompute(const InputData &inp, const CRRInParams &in_params, CRRResParams
    }
 }
 
-auto KernelRuntime(event e) {
-  auto start{e.get_profiling_info<info::event_profiling::command_start>()};
-  auto end{e.get_profiling_info<info::event_profiling::command_end>()};
-
-  return (end - start) / 1000000.0f;
-}
-
-
 double CrrSolver(const int n_crrs,
                  const vector<InputData> &inp,
                  const vector<CRRInParams> &in_params,
                  vector<CRRResParams> &res_params,
                  queue &q) {
-  // auto start = std::chrono::high_resolution_clock::now();
+  auto start = std::chrono::high_resolution_clock::now();
 
   buffer inp_params(inp);
   buffer i_params(in_params);
@@ -160,7 +142,7 @@ double CrrSolver(const int n_crrs,
 
   int n_steps = inp[0].n_steps + kExtraStepsForOptionType0;
 
-  auto e = q.submit([&](handler &h) {
+  q.submit([&](handler &h) {
     accessor accessor_inp(inp_params, h, read_only);
     accessor accessor_i(i_params, h, read_only);
     accessor accessor_r(r_params, h,  write_only, no_init);
@@ -184,20 +166,12 @@ double CrrSolver(const int n_crrs,
     });
   });
 
-    auto kernel_time = KernelRuntime(e);
-
-  // auto end = std::chrono::high_resolution_clock::now();
-  // double diff = std::chrono::duration<double, std::milli>(end - start).count();
-  return kernel_time;
-
+  auto end = std::chrono::high_resolution_clock::now();
+  double diff = std::chrono::duration<double, std::milli>(end - start).count();
+  return diff;
 }
 
-#if FPGA_SIMULATOR
-#define MAX_COUNT 4
-#else
 #define MAX_COUNT 10
-#endif
-
 
 void ReadInputFromFile(ifstream &input_file, vector<InputData> &inp) {
   string line_of_args;
@@ -463,8 +437,8 @@ bool TestCorrectness(size_t n_crrs, vector<OutputRes> &fpga_res, vector<OutputRe
 void TestThroughput(const double &time, const int &n_crrs) {
   std::cout << "\n============= Throughput Test =============\n";
 
-  std::cout << "   Avg throughput:   " << std::fixed << std::setprecision(2)
-            << (n_crrs / time) * 1000 << " assets/s\n";
+  std::cout << "   Avg throughput:   " << std::fixed << std::setprecision(1)
+            << (n_crrs / time) << " assets/s\n";
 }
 
 bool ValidateFilename(string filename) {
@@ -566,9 +540,7 @@ int main(int argc, char *argv[]) {
     auto selector = sycl::ext::intel::fpga_emulator_selector_v;
 #endif
 
-    queue q(selector, fpga_tools::exception_handler,
-            property::queue::enable_profiling{});
-
+    queue q(selector, fpga_tools::exception_handler);
 
     std::cout << "Running on device:  "
               << q.get_device().get_info<info::device::name>().c_str() << "\n";

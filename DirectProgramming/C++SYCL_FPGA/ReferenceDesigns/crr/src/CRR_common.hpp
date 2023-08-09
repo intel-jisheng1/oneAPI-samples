@@ -32,7 +32,11 @@
 constexpr int kMaxFilenameLen = 1024;
 
 // Maximum number of time steps in the binomial tree
+// #ifndef FPGA_HARDWARE
+// constexpr size_t kMaxNSteps  = 125;
+// #else
 constexpr size_t kMaxNSteps  = 8189;
+// #endif
 // Increments of kMaxNSteps
 constexpr size_t kMaxNSteps1 = kMaxNSteps + 1;
 constexpr size_t kMaxNSteps2 = kMaxNSteps + 2;
@@ -61,7 +65,7 @@ constexpr size_t kNumOptionTypes = 3;
 // The order of fields in this struct matches the order of columns in the
 // input csv file.
 typedef struct {
-  double n_steps; /* n_steps = number of time steps in the binomial tree. */
+  int n_steps; /* n_steps = number of time steps in the binomial tree. */
   int cp;         /* cp = -1 or 1 for Put & Call respectively. */
   double spot;    /* spot = spot price of the underlying. */
   double fwd;     /* fwd = forward price of the underlying. */
@@ -74,7 +78,7 @@ typedef struct {
 
 // Pre-processed input for one option type
 typedef struct {
-  double n_steps; /* n_steps = number of time steps in the binomial tree. */
+  int n_steps; /* n_steps = number of time steps in the binomial tree. */
   double u;       /* u = the increase factor of a up movement in the binomial tree,
                          same for each time step. */
   double u2;      /* u2 = the square of increase factor. */
