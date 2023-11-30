@@ -12,6 +12,8 @@
 
 #if defined(FPGA_SIMULATOR)
   constexpr size_t kRowLength = 16;
+#elif defined(USER_KROWLENGTH)
+  constexpr size_t kRowLength = USER_KROWLENGTH;
 #else
   constexpr size_t kRowLength = 128;
 #endif
@@ -56,7 +58,7 @@ void TransposeAndFold(const std::array<float, kMatrixSize> &m_input,
 
       h.single_task<KernelCompute<safe_len>>([=]()
                                              [[intel::kernel_args_restrict]] {
-        float in_buffer[kRowLength][kRowLength];
+        [[intel::doublepump]] float in_buffer[kRowLength][kRowLength];
         float temp_buffer[kRowLength][kRowLength];
 
         // Initialize local buffers
