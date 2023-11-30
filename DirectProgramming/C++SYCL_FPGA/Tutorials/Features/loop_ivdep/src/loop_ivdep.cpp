@@ -12,10 +12,8 @@
 
 #if defined(FPGA_SIMULATOR)
   constexpr size_t kRowLength = 16;
-#elif defined(USER_KROWLENGTH)
-  constexpr size_t kRowLength = USER_KROWLENGTH;
 #else
-  constexpr size_t kRowLength = 128;
+  constexpr size_t kRowLength = USER_KROWLENGTH;
 #endif
 constexpr size_t kMinSafelen = 1;
 constexpr size_t kMaxSafelen = kRowLength;
