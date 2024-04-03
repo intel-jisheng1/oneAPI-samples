@@ -70,6 +70,7 @@ void MatrixReadFromDDRToPipe(
 
         // Perform the DDR burst read of num_elem_per_bank elements
         fpga_tools::UnrolledLoop<num_elem_per_bank>([&](auto k) {
+        //for(int k = 0; k < num_elem_per_bank; k++){
           if constexpr (kIncompleteBurst) {
             // Check if the current read index is beyond the end of the current
             // matrix column

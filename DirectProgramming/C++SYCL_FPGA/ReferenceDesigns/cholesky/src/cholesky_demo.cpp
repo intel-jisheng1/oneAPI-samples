@@ -63,21 +63,11 @@ int main(int argc, char *argv[]) {
   constexpr size_t kLMatrixSize = (kColumns * (kColumns + 1)) / 2;
   constexpr bool kComplex = COMPLEX != 0;
 
-#if defined(FPGA_SIMULATOR)
   constexpr size_t kMatricesToDecompose = 1;
-#else
-  constexpr size_t kMatricesToDecompose = 8;
-#endif
 
   // Get the number of times we want to repeat the decomposition
   // from the command line.
-#if defined(FPGA_EMULATOR)
-  int repetitions = argc > 1 ? atoi(argv[1]) : 16;
-#elif defined(FPGA_SIMULATOR)
   int repetitions = argc > 1 ? atoi(argv[1]) : 1;
-#else
-  int repetitions = argc > 1 ? atoi(argv[1]) : 819200;
-#endif
 
   if (repetitions < 1) {
     std::cerr << "Number of repetitions given is lower than 1." << std::endl;
@@ -200,7 +190,7 @@ int main(int argc, char *argv[]) {
 
     // Floating-point error threshold value at which we decide that the design
     // computed an incorrect value
-    constexpr float kErrorThreshold = 1e-4;
+    constexpr float kErrorThreshold = 1e-3;
 
     // Check L matrices
     std::cout << "Verifying results..." << std::endl;

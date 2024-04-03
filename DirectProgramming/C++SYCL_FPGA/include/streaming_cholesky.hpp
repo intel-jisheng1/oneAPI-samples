@@ -83,21 +83,23 @@ struct StreamingCholesky {
       constexpr short kNumBanksNextPow2 =
           fpga_tools::Pow2(fpga_tools::CeilLog2(kNumBanks));
 
-      [[intel::numbanks(kNumBanksNextPow2)]]  // NO-FORMAT: Attribute
-      [[intel::bankwidth(kBankwidth)]]        // NO-FORMAT: Attribute
-      [[intel::private_copies(4)]]            // NO-FORMAT: Attribute
-      [[intel::max_replicates(1)]]            // NO-FORMAT: Attribute
+      //[[intel::numbanks(kNumBanksNextPow2)]]  // NO-FORMAT: Attribute
+      //[[intel::bankwidth(kBankwidth)]]        // NO-FORMAT: Attribute
+      // [[intel::private_copies(4)]]            // NO-FORMAT: Attribute
+      //[[intel::max_replicates(1)]]            // NO-FORMAT: Attribute
       TT a_load[rows][kColumns];
 
       // Two copies of L to be able to load two complete rows per iteration
       // Multiple private copies to be able to overlap multiple loop
       // iterations
-      [[intel::private_copies(4)]]  // NO-FORMAT: Attribute
+      // [[intel::private_copies(4)]]  // NO-FORMAT: Attribute
+      // [[intel::fpga_register]]      // NO-FORMAT: Attribute
       TT l_result_compute[rows][kColumns];
-      [[intel::private_copies(4)]]  // NO-FORMAT: Attribute
+      // [[intel::private_copies(4)]]  // NO-FORMAT: Attribute
+      // [[intel::fpga_register]]      // NO-FORMAT: Attribute
       TT l_result_compute_copy[rows][kColumns];
 
-      [[intel::private_copies(2)]]  // NO-FORMAT: Attribute
+      // [[intel::private_copies(2)]]  // NO-FORMAT: Attribute
       TT l_result[kLMatrixSize];
 
       // Copy a matrix from the pipe to a local memory
@@ -110,7 +112,7 @@ struct StreamingCholesky {
       constexpr int kLoopIterBitSize =
           fpga_tools::BitsForMaxValue<kLoopIter + 1>();
 
-      [[intel::initiation_interval(1)]]  // NO-FORMAT: Attribute
+      // [[intel::initiation_interval(1)]]  // NO-FORMAT: Attribute
       for (ac_int<kLoopIterBitSize, false> li = 0; li < kLoopIter; li++) {
         fpga_tools::NTuple<TT, pipe_size> pipe_read = AIn::read();
 
@@ -157,7 +159,8 @@ struct StreamingCholesky {
         // row and column from element 0 to column
 
         TT sum = 0;
-        fpga_tools::UnrolledLoop<kColumns>([&](auto k) {
+        // fpga_tools::UnrolledLoop<kColumns>([&](auto k) {
+        for (int k = 0; k < kColumns; k++) {
           TT to_add;
           bool should_compute =  k < column;
           TT mul_lhs = should_compute ? l_result_compute[row][k] : T{0};
@@ -169,7 +172,7 @@ struct StreamingCholesky {
             to_add = mul_lhs * mul_rhs;
           }
           sum += to_add;
-        });
+        }//);
 
         TT a_loaded = (row < rows) ? a_load[row][column] : TT{0};
         TT diff = a_loaded - sum;
