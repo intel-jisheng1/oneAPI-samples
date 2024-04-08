@@ -67,7 +67,7 @@ int main(int argc, char *argv[]) {
 
   // Get the number of times we want to repeat the decomposition
   // from the command line.
-  int repetitions = argc > 1 ? atoi(argv[1]) : 1;
+  int repetitions = argc > 1 ? atoi(argv[1]) : 100;
 
   if (repetitions < 1) {
     std::cerr << "Number of repetitions given is lower than 1." << std::endl;
