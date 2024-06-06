@@ -34,6 +34,8 @@ int main(int argc, char **argv) {
     TestFFT(true, true);
 
   } else {
+    std::cout << "No program argument was passed, running all fft2d variants"
+              << std::endl;
     std::string mode = argv[1];
 
     bool mangle{};
@@ -363,7 +365,7 @@ void TestFFT(bool mangle, bool inverse) {
       }
     }
     if(num_wrong == 0) {
-      std::cout<< "PASSED"<<std::endl<< "PASSED"<<std::endl<< "PASSED"<<std::endl<< "PASSED"<<std::endl;
+      std::cout<< " --> PASSED"<<std::endl<< " --> PASSED"<<std::endl<< " --> PASSED"<<std::endl<< " --> PASSED"<<std::endl;
     } else {
       std::cout<< "FAILED"<<std::endl;
     }
