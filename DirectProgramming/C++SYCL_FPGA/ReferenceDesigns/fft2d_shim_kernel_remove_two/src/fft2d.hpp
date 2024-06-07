@@ -431,32 +431,32 @@ struct ShimKernelStore {
   }
 };
 
-template <int logn, size_t log_points, typename PipeIn, typename PipeOut, typename T>
-struct ShimKernel {
-  ac_complex<T> *storeTo;
+// template <int logn, size_t log_points, typename PipeIn, typename PipeOut, typename T>
+// struct ShimKernel {
+//   ac_complex<T> *storeTo;
 
-  ShimKernel(ac_complex<T> *storeTo_) : storeTo(storeTo_) {}
+//   ShimKernel(ac_complex<T> *storeTo_) : storeTo(storeTo_) {}
 
-  [[intel::kernel_args_restrict]]  // NO-FORMAT: Attribute
-  void operator()() const {
-    constexpr int kN = (1 << logn);
-    constexpr int kPoints = (1 << log_points);
-    constexpr int kWorkGroupSize = kN;
-    constexpr int kIterations = kN * kN / kPoints / kWorkGroupSize;
+//   [[intel::kernel_args_restrict]]  // NO-FORMAT: Attribute
+//   void operator()() const {
+//     constexpr int kN = (1 << logn);
+//     constexpr int kPoints = (1 << log_points);
+//     constexpr int kWorkGroupSize = kN;
+//     constexpr int kIterations = kN * kN / kPoints / kWorkGroupSize;
 
-    int where = 0;
-    for (int i = 0; i < kIterations; i++) {
-      for (int work_item = 0; work_item < kWorkGroupSize; work_item++) {
-        std::array<ac_complex<T>, kPoints> data = PipeIn::read();
-        PipeOut::write(data);
-        for (int k = 0; k < kPoints; k++) {
-          storeTo[where + k] = data[k];
-        }
-        where += kPoints;
-      }
-    }
-  }
-};
+//     int where = 0;
+//     for (int i = 0; i < kIterations; i++) {
+//       for (int work_item = 0; work_item < kWorkGroupSize; work_item++) {
+//         std::array<ac_complex<T>, kPoints> data = PipeIn::read();
+//         PipeOut::write(data);
+//         for (int k = 0; k < kPoints; k++) {
+//           storeTo[where + k] = data[k];
+//         }
+//         where += kPoints;
+//       }
+//     }
+//   }
+// };
 
 /* This kernel reads the matrix data and provides "1<<log_points" data to the
  * FFT engine.
