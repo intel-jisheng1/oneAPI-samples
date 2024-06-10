@@ -133,6 +133,11 @@ endif()
 configure_file("src/emu_shim_data1_0.txt" "emu_shim_data1_0.txt" COPYONLY)
 configure_file("src/emu_shim_data2_0.txt" "emu_shim_data2_0.txt" COPYONLY)
 
+configure_file("src/emu_fullfft_data_0_5_4.txt" "emu_fullfft_data_0_5_4.txt" COPYONLY)
+configure_file("src/emu_fullfft_data_0_6_4.txt" "emu_fullfft_data_0_6_4.txt" COPYONLY)
+configure_file("src/emu_shim_data2_0_5_4.txt" "emu_shim_data2_0_5_4.txt" COPYONLY)
+configure_file("src/emu_shim_data2_0_6_4.txt" "emu_shim_data2_0_6_4.txt" COPYONLY)
+
 set(COMMON_COMPILE_FLAGS -fintelfpga -Wall ${WIN_FLAG} ${QACTYPES} ${USER_FLAGS} ${BSP_FLAG})
 set(COMMON_LINK_FLAGS -fintelfpga ${QACTYPES} ${USER_FLAGS})
 

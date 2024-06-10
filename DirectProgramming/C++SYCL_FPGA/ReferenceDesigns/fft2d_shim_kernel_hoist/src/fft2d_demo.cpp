@@ -143,7 +143,15 @@ void TestFFT(bool mangle, bool inverse) {
     // }
 
     std::ifstream emuData1("emu_shim_data1_0.txt"); 
-    std::ifstream emuData2("emu_shim_data2_0.txt"); 
+    std::ifstream emuData2;
+    if constexpr(kLogN == 5 && kParallelism == 4) {
+      emuData2 = std::ifstream("emu_shim_data2_0_5_4.txt"); 
+    } else if constexpr(kLogN == 6 && kParallelism == 4) { 
+      emuData2 = std::ifstream("emu_shim_data2_0_6_4.txt"); 
+    } else {
+      assert(kLogN == 10 && kParallelism == 8);
+      emuData2 = std::ifstream("emu_shim_data2_0.txt"); 
+    }
     
     if (!emuData1.is_open() || !emuData2.is_open()) { 
         std::cerr << "Failed to open file for writing.\n"; 
@@ -371,6 +379,7 @@ void TestFFT(bool mangle, bool inverse) {
     // q.memcpy(host_output_data, output_data, sizeof(ac_complex<float>) * kN * kN)
     //     .wait();
     int num_wrong= 0;
+
     for (int i = 0; i < kN*kN; ++i) { 
       if( std::abs(host_shim_data2[i].r() - host_output_data[i].r()) >= 1e-3) {
         std::cout<< "wrong results, expecting " << host_output_data[i].r() << " but got " << host_shim_data2[i].r() << " at index " << i<< std::endl;
@@ -385,6 +394,7 @@ void TestFFT(bool mangle, bool inverse) {
         if(num_wrong > 10) break;
       }
     }
+
     if(num_wrong == 0) {
       std::cout<< " --> PASSED"<<std::endl<< " --> PASSED"<<std::endl<< " --> PASSED"<<std::endl<< " --> PASSED"<<std::endl;
     } else {
