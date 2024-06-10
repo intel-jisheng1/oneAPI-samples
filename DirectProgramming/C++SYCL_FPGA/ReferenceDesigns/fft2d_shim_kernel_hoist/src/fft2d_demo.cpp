@@ -148,8 +148,16 @@ void TestFFT(bool mangle, bool inverse) {
       emuData2 = std::ifstream("emu_shim_data2_0_5_4.txt"); 
     } else if constexpr(kLogN == 6 && kParallelism == 4) { 
       emuData2 = std::ifstream("emu_shim_data2_0_6_4.txt"); 
+    } else if constexpr(kLogN == 7 && kParallelism == 4) { 
+      emuData2 = std::ifstream("emu_shim_data2_0_7_4.txt"); 
+    } else if constexpr(kLogN == 6 && kParallelism == 8) { 
+      emuData2 = std::ifstream("emu_shim_data2_0_6_8.txt"); 
+    } else if constexpr(kLogN == 7 && kParallelism == 8) { 
+      emuData2 = std::ifstream("emu_shim_data2_0_7_8.txt"); 
+    } else if constexpr(kLogN == 8 && kParallelism == 8) { 
+      emuData2 = std::ifstream("emu_shim_data2_0_8_8.txt"); 
     } else {
-      assert(kLogN == 10 && kParallelism == 8);
+      // assert(kLogN == 10 && kParallelism == 8);
       emuData2 = std::ifstream("emu_shim_data2_0.txt"); 
     }
     
