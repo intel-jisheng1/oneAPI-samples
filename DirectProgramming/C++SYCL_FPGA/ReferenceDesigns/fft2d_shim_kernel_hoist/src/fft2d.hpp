@@ -251,7 +251,7 @@ std::array<ac_complex<T>, points> ComplexRotate(
 template <int logn, size_t points, typename T>
 std::array<ac_complex<T>, points> FFTStep(
     std::array<ac_complex<T>, points> data, int step,
-    ac_complex<T> *fft_delay_elements, bool inverse) {
+    ac_complex<T> *fft_delay_elements, bool inverse, ac_complex<T> *storeTo, int where) {
   constexpr int size = 1 << logn;
 
   // Swap real and imaginary components if doing an inverse transform
@@ -261,8 +261,22 @@ std::array<ac_complex<T>, points> FFTStep(
 
   // Stage 0 of feed-forward FFT
   data = Butterfly(data);
+  for(int j = 0; j < points; j++) {
+    storeTo[where + j] = data[j];
+  }
+  where += points;
+
   data = TrivialRotate(data);
+  for(int j = 0; j < points; j++) {
+    storeTo[where + j] = data[j];
+  }
+  where += points;
+
   data = TrivialSwap(data);
+  for(int j = 0; j < points; j++) {
+    storeTo[where + j] = data[j];
+  }
+  where += points;
 
   int stage;
   constexpr int kInitStages = points == 8 ? 2 : 1;
@@ -292,12 +306,24 @@ std::array<ac_complex<T>, points> FFTStep(
     int data_index = (step + (1 << (logn - 1 - stage))) & (size / points - 1);
 
     data = Butterfly(data);
+    for(int j = 0; j < points; j++) {
+      storeTo[where + j] = data[j];
+    }
+    where += points;
 
     if (complex_stage) {
       data = ComplexRotate<size>(data, data_index, stage);
+      for(int j = 0; j < points; j++) {
+        storeTo[where + j] = data[j];
+      }
+      where += points;
     }
 
     data = Swap(data);
+    for(int j = 0; j < points; j++) {
+      storeTo[where + j] = data[j];
+    }
+    where += points;
 
     // Compute the delay of this stage
     int delay = 1 << (logn - 2 - stage);
@@ -312,14 +338,26 @@ std::array<ac_complex<T>, points> FFTStep(
                                  points * (stage - kInitStages);
 
     data = ReorderData(data, delay, head_buffer, toggle);
+    for(int j = 0; j < points; j++) {
+      storeTo[where + j] = data[j];
+    }
+    where += points;
 
     if (!complex_stage) {
       data = TrivialRotate(data);
+      for(int j = 0; j < points; j++) {
+        storeTo[where + j] = data[j];
+      }
+      where += points;
     }
   }
 
   // Stage logn - 1
   data = Butterfly(data);
+  for(int j = 0; j < points; j++) {
+    storeTo[where + j] = data[j];
+  }
+  where += points;
 
 // Shift the contents of the sliding window. The hardware is capable of
 // shifting the entire contents in parallel if the loop is unrolled. More
@@ -538,8 +576,9 @@ template <int logn, size_t log_points, typename PipeIn, typename PipeOut,
 struct FFT {
   int inverse;
   ac_complex<T> *storeTo;
+  ac_complex<T> *storeToHoist;
 
-  FFT(int inverse_, ac_complex<T> *storeTo_) : inverse(inverse_), storeTo(storeTo_) {}
+  FFT(int inverse_, ac_complex<T> *storeTo_, ac_complex<T> *storeToHoist_) : inverse(inverse_), storeTo(storeTo_), storeToHoist(storeToHoist_) {}
 
   void operator()() const {
     constexpr int kN = (1 << logn);
@@ -556,6 +595,7 @@ struct FFT {
     // needs to run "kN / kPoints - 1" additional iterations to drain the last
     // outputs
     int where = 0;
+    int whereHoist= 0;
     for (unsigned i = 0; i < kN * (kN / kPoints) + kN / kPoints - 1; i++) {
       std::array<ac_complex<T>, kPoints> data;
 
@@ -568,7 +608,8 @@ struct FFT {
 
       // Perform one FFT step
       data =
-          FFTStep<logn>(data, i % (kN / kPoints), fft_delay_elements, inverse);
+          FFTStep<logn>(data, i % (kN / kPoints), fft_delay_elements, inverse, storeToHoist, whereHoist);
+      whereHoist += kPoints * 24;
       for(int j = 0; j < kPoints; j++) {
         storeTo[where + j] = data[j];
       }

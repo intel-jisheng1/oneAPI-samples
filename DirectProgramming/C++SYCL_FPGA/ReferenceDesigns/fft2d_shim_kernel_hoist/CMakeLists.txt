@@ -141,6 +141,8 @@ configure_file("src/emu_fullfft_data_0_7_8.txt" "emu_fullfft_data_0_7_8.txt" COP
 configure_file("src/emu_fullfft_data_0_8_8.txt" "emu_fullfft_data_0_8_8.txt" COPYONLY)
 
 
+configure_file("src/emu_fullfft_data_hoist_0_7_4.txt" "emu_fullfft_data_hoist_0_7_4.txt" COPYONLY)
+
 configure_file("src/emu_shim_data2_0_5_4.txt" "emu_shim_data2_0_5_4.txt" COPYONLY)
 configure_file("src/emu_shim_data2_0_6_4.txt" "emu_shim_data2_0_6_4.txt" COPYONLY)
 configure_file("src/emu_shim_data2_0_7_4.txt" "emu_shim_data2_0_7_4.txt" COPYONLY)

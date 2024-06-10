@@ -121,9 +121,12 @@ void TestFFT(bool mangle, bool inverse) {
         (ac_complex<float> *)std::malloc(sizeof(ac_complex<float>) * kN * kN);
     ac_complex<float> *host_shim_fullfft_data =
         (ac_complex<float> *)std::malloc(sizeof(ac_complex<float>) * (kN * (kN / kParallelism) + kN / kParallelism - 1) * kParallelism);
+    ac_complex<float> *host_shim_fullfft_data_hoist =
+        (ac_complex<float> *)std::malloc(sizeof(ac_complex<float>) * (kN * (kN / kParallelism) + kN / kParallelism - 1) * kParallelism * 24);
 
     if ((host_input_data == nullptr) || (host_output_data == nullptr) /*||
-        (host_verify == nullptr) || (host_verify_tmp == nullptr)*/) {
+        (host_verify == nullptr) || (host_verify_tmp == nullptr)*/
+        || (host_shim_data1 == nullptr)|| (host_shim_data2 == nullptr)|| (host_shim_fullfft_data == nullptr)|| (host_shim_fullfft_data_hoist == nullptr)) {
       std::cerr << "Failed to allocate host memory with malloc." << std::endl;
       std::terminate();
     }
@@ -189,6 +192,7 @@ void TestFFT(bool mangle, bool inverse) {
     ac_complex<float> *shim_data1;
     ac_complex<float> *shim_data2;
     ac_complex<float> *shim_fullfft_data;
+    ac_complex<float> *shim_fullfft_data_hoist;
 
     if (q.get_device().has(sycl::aspect::usm_device_allocations)) {
       std::cout << "Using USM device allocations" << std::endl;
@@ -199,6 +203,7 @@ void TestFFT(bool mangle, bool inverse) {
       shim_data1 = sycl::malloc_device<ac_complex<float>>(kN * kN, q);
       shim_data2 = sycl::malloc_device<ac_complex<float>>(kN * kN, q);
       shim_fullfft_data = sycl::malloc_device<ac_complex<float>>((kN * (kN / kParallelism) + kN / kParallelism - 1) * kParallelism, q);
+      shim_fullfft_data_hoist = sycl::malloc_device<ac_complex<float>>((kN * (kN / kParallelism) + kN / kParallelism - 1) * kParallelism * 24, q);
     } else if (q.get_device().has(sycl::aspect::usm_host_allocations)) {
       std::cout << "Using USM host allocations" << std::endl;
       // No device allocations means that we are probably in a SYCL HLS
@@ -224,7 +229,7 @@ void TestFFT(bool mangle, bool inverse) {
     }
 
     if (input_data == nullptr || output_data == nullptr ||
-        temp_data == nullptr || shim_data1 == nullptr || shim_data2 == nullptr ||shim_fullfft_data == nullptr ) {
+        temp_data == nullptr || shim_data1 == nullptr || shim_data2 == nullptr ||shim_fullfft_data == nullptr ||shim_fullfft_data_hoist == nullptr) {
       std::cerr << "Failed to allocate USM memory." << std::endl;
       std::terminate();
     }
@@ -307,7 +312,7 @@ void TestFFT(bool mangle, bool inverse) {
 
       auto fft_event = q.single_task<class FFTKernel>(
           FFT<kLogN, kLogParallelism, ShimToFFT, FFTToShim, float>{
-              inverse, shim_fullfft_data});
+              inverse, shim_fullfft_data, shim_fullfft_data_hoist});
 
       auto shim_event_2 = q.single_task<class ShimKernel2>(
           ShimKernelStore<kLogN, kLogParallelism, FFTToShim, float>{shim_data2});
@@ -335,6 +340,8 @@ void TestFFT(bool mangle, bool inverse) {
       q.memcpy(host_shim_data2, shim_data2, sizeof(ac_complex<float>) * kN * kN)
           .wait();
       q.memcpy(host_shim_fullfft_data, shim_fullfft_data, sizeof(ac_complex<float>) * (kN * (kN / kParallelism) + kN / kParallelism - 1) * kParallelism)
+          .wait();
+      q.memcpy(host_shim_fullfft_data_hoist, shim_fullfft_data_hoist, sizeof(ac_complex<float>) * (kN * (kN / kParallelism) + kN / kParallelism - 1) * kParallelism * 24)
           .wait();
 
       // std::string filename1 = "shim_data1_" + std::to_string(i) + ".txt";
@@ -380,6 +387,21 @@ void TestFFT(bool mangle, bool inverse) {
     
       // Closing the file 
       outfile3.close(); 
+
+      std::string filename4 = "shim_fullfft_data_hoist_" + std::to_string(i) + ".txt";
+      std::ofstream outfile4(filename4); 
+      if (!outfile4.is_open()) { 
+          std::cerr << "Failed to open file for writing.\n"; 
+          exit(1);
+      } 
+    
+      // Writing the array elements to the file 
+      for (int i = 0; i < (kN * (kN / kParallelism) + kN / kParallelism - 1) * kParallelism*24; ++i) { 
+          outfile4<< host_shim_fullfft_data_hoist[i].r() << " "<< host_shim_fullfft_data_hoist[i].i() << " "; 
+      } 
+    
+      // Closing the file 
+      outfile4.close(); 
 
     double kernel_runtime = (end_time - start_time) / 1.0e9;
 
