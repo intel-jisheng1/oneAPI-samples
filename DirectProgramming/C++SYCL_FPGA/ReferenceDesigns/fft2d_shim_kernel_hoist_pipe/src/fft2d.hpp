@@ -3,7 +3,7 @@
 
 #define _USE_MATH_DEFINES
 #include <cmath>
-
+#include <cassert>
 #include <sycl/ext/intel/ac_types/ac_complex.hpp>
 #include <sycl/ext/intel/fpga_extensions.hpp>
 #include <sycl/sycl.hpp>
@@ -122,7 +122,7 @@ std::array<ac_complex<T>, points> ReorderData(
   // the contents of the entire buffer is shifted by 1 element
 
 #pragma unroll
-  for (int k = 0; k < points; k++) {
+  for (int k = 0; k < points / 2; k++) {
     data[k * 2 + 1] = Delay(data[k * 2 + 1], depth,
                             shift_reg + (k * 2 + 1 - 1) / 2 * (depth + 1));
   }
